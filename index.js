@@ -1,7 +1,8 @@
-// TempMail + Telegram Bot Worker
-// Cloudflare Dashboard paste directly
+// TempMail + Telegram Worker
 
-const UPSTREAM = "https://tempmail.itz-ashlynn.workers.dev/"; 
+const TELEGRAM_TOKEN = TELEGRAM_TOKEN || ""; // From wrangler.toml / .env
+const SECRET_PATH = TELEGRAM_SECRET_PATH || ""; // From wrangler.toml / .env
+const KV = USER_KV; // KV namespace from wrangler.toml
 
 addEventListener("fetch", event => {
   event.respondWith(handleRequest(event.request));
@@ -9,142 +10,65 @@ addEventListener("fetch", event => {
 
 async function handleRequest(request) {
   const url = new URL(request.url);
-  const path = url.pathname;
-  const secretPath = getEnv("TELEGRAM_SECRET_PATH");
 
-  if (path === `/telegram/${secretPath}` && request.method === "POST") {
+  // Webhook registration
+  if (url.pathname === `/${SECRET_PATH}/registerWebhook`) {
+    return await registerWebhook();
+  }
+
+  // Telegram bot webhook handler
+  if (url.pathname === `/${SECRET_PATH}` && request.method === "POST") {
     const body = await request.json();
-    handleTelegramUpdate(body).catch(console.error);
-    return new Response("ok");
+    return await handleTelegramUpdate(body);
   }
 
-  if (path === "/registerWebhook" && request.method === "GET") {
-    return registerWebhook(request);
-  }
-
-  return new Response("TempMail+Telegram Worker running", { status: 200 });
+  return new Response("TempMail+Telegram Worker running", {
+    headers: { "Content-Type": "text/plain" },
+  });
 }
 
-// ---------- Telegram Handler ----------
+// Register webhook with Telegram
+async function registerWebhook() {
+  const webhookURL = `https://minetemp.raghubamaniya69.workers.dev/${SECRET_PATH}`;
+  const res = await fetch(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/setWebhook?url=${webhookURL}`);
+  const data = await res.json();
+  return new Response(JSON.stringify(data), { headers: { "Content-Type": "application/json" } });
+}
+
+// Handle Telegram updates
 async function handleTelegramUpdate(update) {
-  if (update.message) {
-    const msg = update.message;
-    const chatId = msg.chat.id;
-    const text = (msg.text || "").trim();
+  if (!update.message) return new Response("No message", { status: 200 });
 
-    if (text === "/start") return sendMessage(chatId, "Welcome! Use /new to create temp email, /inbox to check it.");
+  const chatId = update.message.chat.id;
+  const text = update.message.text || "";
 
-    if (text === "/new") {
-      const res = await fetch(`${UPSTREAM}?action=create`);
-      const json = await safeJson(res);
-      if (!json?.result) return sendMessage(chatId, "Failed to create temp email.");
-
-      const token = json.result.emailToken || json.result.token || json.result.tokenId;
-      const address = json.result.address || json.result.email || json.result.mail;
-
-      const userObj = { emailToken: token, address: address || "unknown", createdAt: Date.now(), history: [] };
-      await USER_KV.put(String(chatId), JSON.stringify(userObj));
-      return sendMessage(chatId, `✅ Temp email created: ${userObj.address}\nUse /inbox to list messages.`);
+  if (text === "/start") {
+    await sendMessage(chatId, "Welcome to TempMail+Telegram Bot!\nUse /new to create temp email.");
+  } else if (text === "/new") {
+    const emailToken = crypto.randomUUID();
+    const emailAddress = `${emailToken}@minetemp.workers.dev`;
+    await KV.put(chatId.toString(), JSON.stringify({ emailToken, emailAddress }));
+    await sendMessage(chatId, `Your temp email: ${emailAddress}`);
+  } else if (text === "/inbox") {
+    const data = await KV.get(chatId.toString(), { type: "json" });
+    if (!data) {
+      await sendMessage(chatId, "No temp email found. Use /new first.");
+    } else {
+      // For now just return stored token & address
+      await sendMessage(chatId, `Your email: ${data.emailAddress}\nToken: ${data.emailToken}`);
     }
-
-    if (text === "/inbox") {
-      const userStr = await USER_KV.get(String(chatId));
-      if (!userStr) return sendMessage(chatId, "No email found. Use /new to create one.");
-      const user = JSON.parse(userStr);
-      const token = user.emailToken;
-
-      const resp = await fetch(`${UPSTREAM}?action=messages&emailToken=${encodeURIComponent(token)}`);
-      const j = await safeJson(resp);
-
-      // Safe messages array
-      let messages = [];
-      if (j?.result?.messages && Array.isArray(j.result.messages)) {
-        messages = j.result.messages;
-      } else if (j?.result && Array.isArray(j.result)) {
-        messages = j.result;
-      } else {
-        messages = [];
-      }
-
-      if (!messages.length) return sendMessage(chatId, "Inbox empty.");
-
-      let parts = [];
-      const inline_keyboard = [];
-      for (let m of messages.slice(0, 20)) {
-        const id = m.id || m.messageId || m._id;
-        const from = m.from || m.sender || "unknown";
-        const subj = m.subject || m.title || "(no subject)";
-        parts.push(`${id || "?"} — ${subj} — ${from}`);
-        if (id) inline_keyboard.push([{ text: `Read: ${subj}`, callback_data: `read:${id}` }]);
-      }
-      return sendMessage(chatId, "Inbox:\n\n" + parts.join("\n"), { reply_markup: { inline_keyboard } });
-    }
-
-    return sendMessage(chatId, "Unknown command. Use /new or /inbox.");
+  } else {
+    await sendMessage(chatId, "Unknown command. Use /start, /new, /inbox.");
   }
 
-  if (update.callback_query) {
-    const cq = update.callback_query;
-    const chatId = cq.message?.chat?.id || cq.from.id;
-    const data = cq.data || "";
-    if (data.startsWith("read:")) {
-      const messageId = data.split("read:")[1];
-      const userStr = await USER_KV.get(String(chatId));
-      if (!userStr) return answerCallback(cq.id, "No email stored.");
-
-      const user = JSON.parse(userStr);
-      const token = user.emailToken;
-      const resp = await fetch(`${UPSTREAM}?action=message&messageId=${encodeURIComponent(messageId)}`);
-      const j = await safeJson(resp);
-      const message = j?.result || {};
-      const from = message?.from || message?.sender || "unknown";
-      const subj = message?.subject || message?.title || "(no subject)";
-      const body = message?.body || message?.content || "(no body)";
-
-      await sendMessage(chatId, `From: ${from}\nSubject: ${subj}\n\n${body}`);
-      await answerCallback(cq.id, "Message delivered.");
-    }
-  }
+  return new Response("OK", { status: 200 });
 }
 
-// ---------- Helpers ----------
-function getEnv(name) {
-  return globalThis[name] || null;
-}
-
-async function sendMessage(chatId, text, extra = {}) {
-  const token = getEnv("TELEGRAM_TOKEN");
-  await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+// Send message helper
+async function sendMessage(chatId, text) {
+  await fetch(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ chat_id: chatId, text: String(text).slice(0, 4096), ...extra })
+    body: JSON.stringify({ chat_id: chatId, text }),
   });
-}
-
-async function answerCallback(callbackQueryId, text) {
-  const token = getEnv("TELEGRAM_TOKEN");
-  await fetch(`https://api.telegram.org/bot${token}/answerCallbackQuery`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ callback_query_id: callbackQueryId, text })
-  });
-}
-
-async function registerWebhook(request) {
-  const token = getEnv("TELEGRAM_TOKEN");
-  const secretPath = getEnv("TELEGRAM_SECRET_PATH");
-  const workerUrl = new URL(request.url);
-  workerUrl.pathname = `/telegram/${secretPath}`;
-  workerUrl.search = "";
-  const webhookUrl = workerUrl.toString();
-  const resp = await fetch(`https://api.telegram.org/bot${token}/setWebhook`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ url: webhookUrl })
-  });
-  return new Response(JSON.stringify(await safeJson(resp)), { status: 200, headers: { "Content-Type": "application/json" } });
-}
-
-async function safeJson(resp) {
-  try { return await resp.json(); } catch { return { text: await resp.text() }; }
 }
