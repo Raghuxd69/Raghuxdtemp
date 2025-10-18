@@ -1,0 +1,12 @@
+name = "minetemp"
+main = "index.js"
+compatibility_date = "2025-10-18"
+
+[vars]
+# Will read from .env automatically
+TELEGRAM_TOKEN = "${TELEGRAM_TOKEN}"
+TELEGRAM_SECRET_PATH = "${TELEGRAM_SECRET_PATH}"
+
+[kv_namespaces]
+binding = "USER_KV"
+id = "${USER_KV}"
