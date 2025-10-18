@@ -25,6 +25,7 @@ async function handleRequest(request) {
   return new Response("TempMail+Telegram Worker running", { status: 200 });
 }
 
+// ---------- Telegram Handler ----------
 async function handleTelegramUpdate(update) {
   if (update.message) {
     const msg = update.message;
@@ -54,7 +55,17 @@ async function handleTelegramUpdate(update) {
 
       const resp = await fetch(`${UPSTREAM}?action=messages&emailToken=${encodeURIComponent(token)}`);
       const j = await safeJson(resp);
-      const messages = j?.result?.messages || j?.result || [];
+
+      // Safe messages array
+      let messages = [];
+      if (j?.result?.messages && Array.isArray(j.result.messages)) {
+        messages = j.result.messages;
+      } else if (j?.result && Array.isArray(j.result)) {
+        messages = j.result;
+      } else {
+        messages = [];
+      }
+
       if (!messages.length) return sendMessage(chatId, "Inbox empty.");
 
       let parts = [];
@@ -86,9 +97,9 @@ async function handleTelegramUpdate(update) {
       const resp = await fetch(`${UPSTREAM}?action=message&messageId=${encodeURIComponent(messageId)}`);
       const j = await safeJson(resp);
       const message = j?.result || {};
-      const from = message.from || message.sender || "unknown";
-      const subj = message.subject || message.title || "(no subject)";
-      const body = message.body || message.content || "(no body)";
+      const from = message?.from || message?.sender || "unknown";
+      const subj = message?.subject || message?.title || "(no subject)";
+      const body = message?.body || message?.content || "(no body)";
 
       await sendMessage(chatId, `From: ${from}\nSubject: ${subj}\n\n${body}`);
       await answerCallback(cq.id, "Message delivered.");
@@ -96,6 +107,7 @@ async function handleTelegramUpdate(update) {
   }
 }
 
+// ---------- Helpers ----------
 function getEnv(name) {
   return globalThis[name] || null;
 }
